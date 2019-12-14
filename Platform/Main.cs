@@ -7,42 +7,89 @@ using System.Text;
 using System.Threading.Tasks;
 using VRageMath;
 
-namespace Platform
+namespace ShipyardManager.Modules.Printer
 {
     public class Program : MyGridProgram
     {
+        Printer printer;
+        Path p;
+        public bool Initialize()
+        {
+            printer = new Printer(GridTerminalSystem, Echo, new PrinterPlatform(GridTerminalSystem, Echo, "Conn Front A", "Conn Front B", "Conn Back A", "Conn Back B", "RC"),
+                    new PrinterBase(GridTerminalSystem, Echo, "Conn Origin A", "Conn Origin B", "Conn Endpoint A", "Conn Endpoint B", "Marker Origin", "Marker Endpoint"), 0,
+                    2.5, 10, Base6Directions.Direction.Forward);
+            if (!printer.IsValid)
+            {
+                Echo("Failed to initialize the printer instance.");
+                return false;
+            }
+            if (!printer.Platform.IsValid)
+            {
+                Echo("Failed to initialize the printer platform instance");
+                return false;
+            }
+            if (!printer.Base.IsValid)
+            {
+                Echo("Failed to initialize the printer base instance");
+                return false;
+            }
+
+            Echo("Printer instance initialized successfully.");
+            return true;
+        }
         public void Main(string argument)
         {
-            // Protected
-            if (!PrinterGPSUtils.Initialized)
+            if(printer == null)
+                if (!Initialize()) return;
+            if (!printer.IsValid)
+                if (!Initialize()) return;
+
+            if(argument == "goOrigin")
             {
-                // Initialize class
-                if (PrinterGPSUtils.Initialize(GridTerminalSystem, "Marker A", "Marker B"))
-                    Echo("GPSUtils setup complete.");
-                else
+                Path path = printer.OptimizePath(printer.GetEndpointOriginPath(10, true), printer.Base.GetOriginPos(), true);
+                if(path.Waypoints.Count == 0)
                 {
-                    Echo("GPSUtils setup failed!");
-                    Echo("Could not find the printer markers.");
+                    Echo("Could not plot a path. Task aborted.");
                     return;
                 }
+                printer.Platform.SetTask(path);
+                Echo($"Platform going to Origin. Distance remaining: {Math.Round(Vector3D.Distance(printer.Base.GetOriginPos(), printer.Platform.RemoteControl.GetPosition()), 2)}m");
+                Echo($"{Vector3D.Distance(path.Waypoints[0].ToVector(), printer.Platform.RemoteControl.GetPosition())}m remaining to the next data point.");
+                return;
             }
-            // Protected
-            if(argument == "getPath")
+            if(argument == "goEndpoint")
             {
-                double offset = 10;
-                List<MyGPSWaypoint> waypoints = PrinterGPSUtils.GetPath(3, offset);
-                StringBuilder builder = new StringBuilder();
-                foreach(MyGPSWaypoint waypoint in waypoints)
+                Path path = printer.OptimizePath(printer.GetOriginEndpointPath(10, true), printer.Base.GetEndpointPos(), true);
+                if (path.Waypoints.Count == 0)
                 {
-                    builder.AppendLine(waypoint.Serialize());
+                    Echo("Could not plot a path. Task aborted.");
+                    return;
                 }
-
-                Me.CustomData = builder.ToString();
-                Echo($"Plotted a path containing {waypoints.Count} data points.");
+                printer.Platform.SetTask(path);
+                Echo($"Platform going to Endpoint. Distance remaining: {Math.Round(Vector3D.Distance(printer.Base.GetEndpointPos(), printer.Platform.RemoteControl.GetPosition()), 2)}m");
+                Echo($"{Vector3D.Distance(path.Waypoints[0].ToVector(), printer.Platform.RemoteControl.GetPosition())}m remaining to the next data point.");
+                return;
             }
+            if(argument == "shiftPath 1")
+            {
+                if (p == null) p = printer.GetOriginEndpointPath(10);
+                p.ShiftPathRelative(1);
+                printer.Platform.SetTask(p);
+                return;
+            }
+            if (argument == "shiftPath -1")
+            {
+                if (p == null) p = printer.GetOriginEndpointPath(10);
+                p.ShiftPathRelative(-1);
+                printer.Platform.SetTask(p);
+                return;
+            }
+
+            Echo("Runtime finished.");
+            Echo($"Instruction count: {Runtime.CurrentInstructionCount}");
+            Echo($"Last execution time: {Runtime.LastRunTimeMs}ms");
         }
     }
-
     public class MyGPSWaypoint
     {
         public double X;
@@ -107,172 +154,349 @@ namespace Platform
             Name = name;
         }
 
+        public static implicit operator MyGPSWaypoint(MyWaypointInfo w)
+        {
+            return new MyGPSWaypoint(w.Name, w.Coords);
+        }
+
         public static implicit operator MyWaypointInfo(MyGPSWaypoint w)
         {
             return new MyWaypointInfo(w.Name, w.X, w.Y, w.Z);
         }
     }
-    public static class PrinterController
+    public class ConnectorPair
     {
-        public static IMyShipConnector ConnectorFrontA;
-        public static IMyShipConnector ConnectorFrontB;
-        public static IMyShipConnector ConnectorBackA;
-        public static IMyShipConnector ConnectorBackB;
-        public static IMyRemoteControl RemoteControl;
-        private static IMyGridTerminalSystem GridTerminalSystem;
+        public IMyShipConnector Left;
+        public IMyShipConnector Right;
 
-        public static List<MyGPSWaypoint> CurrentWaypoints;
+        public bool IsValid;
 
-        public static bool IsPrinterNull()
+        public ConnectorPair(IMyShipConnector left, IMyShipConnector right)
         {
-            return (ConnectorFrontA == null || ConnectorFrontB == null || ConnectorBackA == null || ConnectorBackB == null || RemoteControl == null);
+            if (left == null) return;
+            if (right == null) return;
+            Left = left;
+            Right = right;
+            IsValid = true;
         }
 
-        public static void CancelTask()
+        public void Lock()
         {
-            RemoteControl.ClearWaypoints();
-            RemoteControl.SetAutoPilotEnabled(false);
-            CurrentWaypoints.Clear();
+            if (!IsValid) return;
+            Left.Connect();
+            Right.Connect();
         }
-
-        public static bool IsWorking()
+        public void Unlock()
         {
-            return (RemoteControl.IsAutoPilotEnabled);
+            if (!IsValid) return;
+            Left.Disconnect();
+            Right.Disconnect();
         }
-
-        public static bool SetTask(List<MyGPSWaypoint> dataPoints, Base6Directions.Direction direction, bool overrideCurrentTask = true)
+        public void PowerOn()
         {
-            if (IsWorking() && overrideCurrentTask) CancelTask();
-            else if (IsWorking()) return false;
+            if (!IsValid) return;
+            Left.ApplyAction("OnOff_On");
+            Right.ApplyAction("OnOff_On");
+        }
+        public void PowerOff()
+        {
+            if (!IsValid) return;
+            Left.ApplyAction("OnOff_Off");
+            Right.ApplyAction("OnOff_Off");
+        }
+    }
+    public class PrinterPlatform
+    {
+        private IMyGridTerminalSystem GTS;
+        public ConnectorPair ConnectorsFront;
+        public ConnectorPair ConnectorsBack;
+        public IMyRemoteControl RemoteControl;
+        public Action<string> Echo;
+        public List<MyGPSWaypoint> CurrentWaypoints { get { return GetCurrentWaypoints(); } }
+        public bool IsValid;
 
-            foreach (MyGPSWaypoint waypoint in dataPoints)
+        public PrinterPlatform(IMyGridTerminalSystem gTS, Action<string> echo, ConnectorPair connectorsFront, ConnectorPair connectorsBack, IMyRemoteControl remoteControl)
+        {
+            if (gTS == null) return;
+            if (echo == null) return;
+            if (connectorsFront == null) return;
+            if (connectorsBack == null) return;
+            if (remoteControl == null) return;
+            GTS = gTS;
+            ConnectorsFront = connectorsFront;
+            ConnectorsBack = connectorsBack;
+            RemoteControl = remoteControl;
+            Echo = echo;
+
+            IsValid = true;
+        }
+        public PrinterPlatform(IMyGridTerminalSystem gTS, Action<string> echo, string connectorsFront_Left_Name, string connectorsFront_Right_Name, 
+            string connectorsBack_Left_Name, string connectorsBack_Right_Name, string remoteControl_Name)
+        {
+            if (gTS == null) return;
+            if (echo == null) return;
+            if (connectorsFront_Left_Name == null) return;
+            if (connectorsFront_Right_Name == null) return;
+            if (connectorsBack_Left_Name == null) return;
+            if (connectorsBack_Right_Name == null) return;
+            if (remoteControl_Name == null) return;
+            GTS = gTS;
+            Echo = echo;
+            try
+            {
+                ConnectorsFront = new ConnectorPair((IMyShipConnector)GTS.GetBlockWithName(connectorsFront_Left_Name), (IMyShipConnector)GTS.GetBlockWithName(connectorsFront_Right_Name));
+                ConnectorsBack = new ConnectorPair((IMyShipConnector)GTS.GetBlockWithName(connectorsBack_Left_Name), (IMyShipConnector)GTS.GetBlockWithName(connectorsBack_Right_Name));
+                RemoteControl = (IMyRemoteControl)GTS.GetBlockWithName(remoteControl_Name);
+                if (ConnectorsFront == null) return;
+                if (ConnectorsBack == null) return;
+                if (RemoteControl == null) return;
+            }
+            catch(Exception)
+            { return; }
+            IsValid = true;
+        }
+        public List<MyGPSWaypoint> GetCurrentWaypoints()
+        {
+            if (RemoteControl == null) return null;
+            List<MyWaypointInfo> waypointInfoList = new List<MyWaypointInfo>();
+            RemoteControl.GetWaypointInfo(waypointInfoList);
+            List<MyGPSWaypoint> gpsWaypointList = new List<MyGPSWaypoint>();
+            waypointInfoList.ForEach((w) => { gpsWaypointList.Add((MyGPSWaypoint)w); });
+            return gpsWaypointList;
+        }
+        public bool SetTask(Path path)
+        {
+            CancelTask();
+            foreach (MyGPSWaypoint waypoint in path.Waypoints)
                 RemoteControl.AddWaypoint(waypoint);
 
-            RemoteControl.Direction = direction;
+            RemoteControl.Direction = path.FlightDirection;
             RemoteControl.SetDockingMode(true);
             RemoteControl.SetAutoPilotEnabled(true);
             return true;
         }
-
-        public static bool Initialize(IMyGridTerminalSystem GTS, string connectorFrontA_name, string connectorFrontB_name, string connectorBackA_name, string connectorBackB_name, string remoteControl_name)
+        public void CancelTask()
         {
-            try
-            {
-                if (GTS == null) return false;
-                GridTerminalSystem = GTS;
-                ConnectorFrontA = GridTerminalSystem.GetBlockWithName(connectorFrontA_name) as IMyShipConnector;
-                ConnectorFrontB = GridTerminalSystem.GetBlockWithName(connectorFrontB_name) as IMyShipConnector;
-                ConnectorBackA = GridTerminalSystem.GetBlockWithName(connectorBackA_name) as IMyShipConnector;
-                ConnectorBackB = GridTerminalSystem.GetBlockWithName(connectorBackB_name) as IMyShipConnector;
-                RemoteControl = GridTerminalSystem.GetBlockWithName(remoteControl_name) as IMyRemoteControl;
-                if (ConnectorFrontA == null || ConnectorFrontB == null || ConnectorBackA == null
-                    || ConnectorBackB == null || RemoteControl == null) return false;
-            }
-            catch(Exception)
-            {
-                return false;
-            }
-            return true;
-        }
-
-        public static bool Initialize(IMyGridTerminalSystem GTS, IMyShipConnector connectorFrontA, IMyShipConnector connectorFrontB, IMyShipConnector connectorBackA, IMyShipConnector connectorBackB, IMyRemoteControl remoteControl)
-        {
-            try
-            {
-                if (GTS == null) return false;
-                GridTerminalSystem = GTS;
-                ConnectorFrontA = connectorFrontA;
-                ConnectorFrontB = connectorFrontB;
-                ConnectorBackA = connectorBackA;
-                ConnectorBackB = connectorBackB;
-                RemoteControl = remoteControl;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-            return true;
+            if (RemoteControl == null) return;
+            if (Echo == null) return;
+            Echo((RemoteControl == null).ToString());
+            Echo((CurrentWaypoints == null).ToString());
+            RemoteControl.ClearWaypoints();
+            RemoteControl.SetAutoPilotEnabled(false);
+            CurrentWaypoints.Clear();
         }
     }
-    public static class PrinterGPSUtils
+    public class PrinterBase
     {
-        public static IMyGridTerminalSystem GridTerminalSystem;
-        public static IMyTerminalBlock MarkerA;
-        public static IMyTerminalBlock MarkerB;
-        public static bool Initialized;
+        public IMyGridTerminalSystem GTS;
+        public IMyTerminalBlock OriginMarker;
+        public IMyTerminalBlock EndpointMarker;
+        public ConnectorPair ConnectorsOrigin;
+        public ConnectorPair ConnectorsEndpoint;
+        public Action<string> Echo;
+        public bool IsValid;
 
-        public static double GetPrinterLength()
+        public PrinterBase(IMyGridTerminalSystem gTS, IMyTerminalBlock markerOrigin, IMyTerminalBlock markerEndpoint, ConnectorPair connectorsOrigin, ConnectorPair connectorsEndpoint, Action<string> echo)
         {
-            if (MarkersNull()) return -1;
-            return Vector3.Distance(MarkerA.GetPosition(), MarkerB.GetPosition());
+            if (gTS == null) return;
+            if (markerOrigin == null) return;
+            if (markerEndpoint == null) return;
+            if (connectorsOrigin == null) return;
+            if (connectorsEndpoint == null) return;
+            if (echo == null) return;
+            GTS = gTS;
+            OriginMarker = markerOrigin;
+            EndpointMarker = markerEndpoint;
+            ConnectorsOrigin = connectorsOrigin;
+            ConnectorsEndpoint = connectorsEndpoint;
+            Echo = echo;
+            IsValid = true;
         }
-
-        public static Vector3D GetPrinterDirection()
+        public PrinterBase(IMyGridTerminalSystem gTS, Action<string> echo, string connectorsOrigin_Left_Name, string connectorsOrigin_Right_Name, string connectorsEndpoint_Left_Name, 
+            string connectorsEndpoint_Right_Name, string markerOrigin_Name, string markerEndpoint_Name)
         {
-            return Vector3.Normalize(MarkerB.GetPosition() - MarkerA.GetPosition());
+            if (gTS == null) return;
+            if (echo == null) return;
+            if (connectorsOrigin_Left_Name == null) return;
+            if (connectorsOrigin_Right_Name == null) return;
+            if (connectorsEndpoint_Left_Name == null) return;
+            if (connectorsEndpoint_Right_Name == null) return;
+            if (markerOrigin_Name == null) return;
+            if (markerEndpoint_Name == null) return;
+            GTS = gTS;
+            Echo = echo;
+            try
+            {
+                ConnectorsOrigin = new ConnectorPair((IMyShipConnector)GTS.GetBlockWithName(connectorsOrigin_Left_Name), (IMyShipConnector)GTS.GetBlockWithName(connectorsOrigin_Right_Name));
+                ConnectorsEndpoint = new ConnectorPair((IMyShipConnector)GTS.GetBlockWithName(connectorsEndpoint_Left_Name), (IMyShipConnector)GTS.GetBlockWithName(connectorsEndpoint_Right_Name));
+                OriginMarker = GTS.GetBlockWithName(markerOrigin_Name);
+                EndpointMarker = GTS.GetBlockWithName(markerEndpoint_Name);
+                if (ConnectorsOrigin == null) return;
+                if (ConnectorsEndpoint == null) return;
+                if (OriginMarker == null) return;
+                if (EndpointMarker == null) return;
+            }
+            catch (Exception)
+            { return; }
+            IsValid = true;
         }
-
-        public static Vector3D GetPrinterDirectionInverse()
+        public Vector3D GetOriginPos()
         {
-            return Vector3.Normalize(MarkerA.GetPosition() - MarkerB.GetPosition());
+            if (OriginMarker == null) return Vector3.Zero;
+            return OriginMarker.GetPosition();
         }
-
-        public static List<MyGPSWaypoint> GetPath(int alignmentPoints, double forward_offset)
+        public Vector3D GetEndpointPos()
         {
-            if (MarkersNull()) return null;
-            Vector3D direction = GetPrinterDirection();
-            Vector3D origin = MarkerA.GetPosition() + (direction * forward_offset);
-            Vector3D endpoint = MarkerB.GetPosition() + (GetPrinterDirectionInverse() * forward_offset);
-            double distance_between_points = Vector3.Distance(origin, endpoint) / alignmentPoints;
+            if (EndpointMarker == null) return Vector3.Zero;
+            return EndpointMarker.GetPosition();
+        }
+        public Vector3D GetForwardDirection()
+        {
+            if(OriginMarker == null) return Vector3.Zero;
+            return OriginMarker.WorldMatrix.Forward;
+        }
+        public Vector3D GetForwardDirectionInverse()
+        {
+            if (EndpointMarker == null) return Vector3.Zero;
+            return EndpointMarker.WorldMatrix.Forward;
+        }
+        public double GetPrinterLength()
+        {
+            if (EndpointMarker == null || OriginMarker == null) return -1;
+            return Vector3.Distance(OriginMarker.GetPosition(), EndpointMarker.GetPosition());
+        }
+        public Vector3D GetUpDirection()
+        {
+            if (OriginMarker == null) return Vector3.Zero;
+            return OriginMarker.WorldMatrix.Up;
+        }
+    }
+    public class Printer
+    {
+        public IMyGridTerminalSystem GridTerminalSystem;
+        public Action<string> Echo;
+        public PrinterPlatform Platform;
+        public PrinterBase Base;
+        public int PrinterY;
+        public double ShiftMagnitude;
+        public double ForwardOffset;
+        public Base6Directions.Direction Direction;
+        public bool IsValid;
+
+        public Printer(IMyGridTerminalSystem gridTerminalSystem, Action<string> echo, PrinterPlatform platform, PrinterBase @base, int printerY, double shiftMagnitude, double forwardOffset, Base6Directions.Direction direction)
+        {
+            if (gridTerminalSystem == null) return;
+            if (echo == null) return;
+            if (platform == null) return;
+            if (@base == null) return;
+            GridTerminalSystem = gridTerminalSystem;
+            Echo = echo;
+            Platform = platform;
+            Base = @base;
+            PrinterY = printerY;
+            ShiftMagnitude = shiftMagnitude;
+            ForwardOffset = forwardOffset;
+            Direction = direction;
+            IsValid = true;
+        }
+        public Path GetOriginEndpointPath(int dataPoint_Amount, bool shiftPathToPrinterY = false)
+        {
+            if (Base.OriginMarker == null || Base.EndpointMarker == null) return null;
+            Vector3D direction = Base.GetForwardDirection();
+            Vector3D origin = Base.GetOriginPos() + (direction * ForwardOffset);
+            Vector3D endpoint = Base.GetEndpointPos() + (Base.GetForwardDirectionInverse() * ForwardOffset);
+            Echo($"ForwardDirection: {Base.GetForwardDirection().ToString()}");
+            Echo($"ForwardDirection.Length: {Base.GetForwardDirection().Length()}");
+            Echo($"ForwardDirectionInverse: {Base.GetForwardDirectionInverse().ToString()}");
+            Echo($"ForwardDirectionInverse.Length: {Base.GetForwardDirectionInverse().Length()}");
+            double distance_between_points = Vector3.Distance(origin, endpoint) / dataPoint_Amount;
             List<MyGPSWaypoint> waypoints = new List<MyGPSWaypoint>();
-            for (int i = 0; i < alignmentPoints + 1; i++)
+            for (int i = 0; i < dataPoint_Amount + 1; i++)
                 waypoints.Add(new MyGPSWaypoint((i + 1).ToString(), origin + ((direction * distance_between_points) * (i))));
-            return waypoints;
+            Path path = new Path(waypoints, Direction, Base.GetUpDirection(), 0, 2.5f);
+            if (shiftPathToPrinterY)
+                path.ShiftPathAbsolute(PrinterY);
+            return path;
+        }
+        public Path GetEndpointOriginPath(int dataPoint_Amount, bool shiftPathToPrinterY = false)
+        {
+            Path p = GetOriginEndpointPath(dataPoint_Amount, shiftPathToPrinterY);
+            p.ReversePathDirection();
+            p.ReverseFlightDirection();
+            return p;
+        }
+        public Path OptimizePath(Path path, Vector3 TargetPosition, bool shiftTargetPosition = false)
+        {
+            Vector3 target = TargetPosition;
+            if (shiftTargetPosition)
+                target = TargetPosition + (path.Up * (path.ShiftMagnitude * path.PathYShift));
+            if (Platform.RemoteControl == null) return null;
+            List<MyGPSWaypoint> relevant_waypoints = new List<MyGPSWaypoint>();
+            foreach (MyGPSWaypoint waypoint in path.Waypoints)
+                if (Vector3.Distance(waypoint.ToVector(), target) < Vector3.Distance(Platform.RemoteControl.GetPosition(), target)) relevant_waypoints.Add(waypoint);
+            return new Path(relevant_waypoints, path.FlightDirection, path.Up, path.PathYShift, path.ShiftMagnitude);
+        }
+    }
+    public class Path
+    {
+        public List<MyGPSWaypoint> Waypoints;
+        public Base6Directions.Direction FlightDirection;
+        public int PathYShift;
+        public readonly float ShiftMagnitude;
+        public readonly Vector3D Up;
+        public Path(List<MyGPSWaypoint> path, Base6Directions.Direction flightDirection, Vector3D UpDirection, int pathYShift = 0, float shiftMagnitude = 2.5f)
+        {
+            Waypoints = path;
+            FlightDirection = flightDirection;
+            Up = UpDirection;
+            PathYShift = pathYShift;
+            ShiftMagnitude = shiftMagnitude;
+        }
+        public void ReverseFlightDirection()
+        {
+            FlightDirection = Base6Directions.GetOppositeDirection(FlightDirection);
+        }
+        public void ReversePathDirection()
+        {
+            PathYShift += 1;
+            Waypoints.Reverse();
+        }
+        public void ShiftPathRelative(int shiftDelta)
+        {
+            int new_shift = PathYShift + shiftDelta;
+            ShiftPathAbsolute(new_shift);
+        }
+        public void ShiftPathAbsolute(int shift)
+        {
+            List<MyGPSWaypoint> new_path = new List<MyGPSWaypoint>();
+            foreach(MyGPSWaypoint waypoint in Waypoints)
+            {
+                Vector3D vShift = Up * (ShiftMagnitude * PathYShift);
+                Vector3D unshifted_pos = waypoint.ToVector() + vShift;
+                Vector3D new_shifted_pos = unshifted_pos + (Up * (ShiftMagnitude * -shift));
+                new_path.Add(new MyGPSWaypoint(waypoint.Name, new_shifted_pos));
+            }
+            PathYShift = shift;
+            Waypoints = new_path;
         }
 
-        public static bool MarkersNull()
+        public static Path ShiftPathRelative(Path pathToShift, int shiftDelta)
         {
-            return (GridTerminalSystem == null || MarkerA == null || MarkerB == null);
+            int new_shift = pathToShift.PathYShift + shiftDelta;
+            return ShiftPathAbsolute(pathToShift, new_shift);
         }
 
-        public static bool Initialize(IMyGridTerminalSystem GTS, string markerA_name, string markerB_name)
+        public static Path ShiftPathAbsolute(Path pathToShift, int shift)
         {
-            try
+            List<MyGPSWaypoint> new_path = new List<MyGPSWaypoint>();
+            foreach (MyGPSWaypoint waypoint in pathToShift.Waypoints)
             {
-                if (GTS == null) return false;
-                GridTerminalSystem = GTS;
-                IMyTerminalBlock markerA = GridTerminalSystem.GetBlockWithName(markerA_name);
-                IMyTerminalBlock markerB = GridTerminalSystem.GetBlockWithName(markerB_name);
-                if (markerA == null) return false;
-                if (markerB == null) return false;
-                MarkerA = markerA;
-                MarkerB = markerB;
+                Vector3D vShift = pathToShift.Up * (pathToShift.ShiftMagnitude * (0 - pathToShift.PathYShift));
+                Vector3D unshifted_pos = waypoint.ToVector() + vShift;
+                Vector3D new_shifted_pos = unshifted_pos + (pathToShift.Up * (pathToShift.ShiftMagnitude * shift));
+                new_path.Add(new MyGPSWaypoint(waypoint.Name, new_shifted_pos));
             }
-            catch (Exception)
-            {
-                return false;
-            }
-            Initialized = true;
-            return true;
-        }
-
-        public static bool Initialize(IMyGridTerminalSystem GTS, IMyTerminalBlock markerA, IMyTerminalBlock markerB)
-        {
-            try
-            {
-                if (GTS == null) return false;
-                GridTerminalSystem = GTS;
-                if (markerA == null) return false;
-                if (markerB == null) return false;
-                MarkerA = markerA;
-                MarkerB = markerB;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-            Initialized = true;
-            return true;
+            return new Path(new_path, pathToShift.FlightDirection, pathToShift.Up, shift, pathToShift.ShiftMagnitude);
         }
     }
 }
