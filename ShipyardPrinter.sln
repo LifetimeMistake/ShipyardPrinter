@@ -5,6 +5,8 @@ VisualStudioVersion = 16.0.29020.237
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Printer", "Platform\Printer.csproj", "{42C9DE13-7179-456A-92EC-4AC6E87A0457}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyAutoGyro Test", "MyAutoGyro Test\MyAutoGyro Test.csproj", "{DA39B925-B236-4299-ADC5-1873461B3053}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{42C9DE13-7179-456A-92EC-4AC6E87A0457}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{42C9DE13-7179-456A-92EC-4AC6E87A0457}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{42C9DE13-7179-456A-92EC-4AC6E87A0457}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DA39B925-B236-4299-ADC5-1873461B3053}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DA39B925-B236-4299-ADC5-1873461B3053}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DA39B925-B236-4299-ADC5-1873461B3053}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DA39B925-B236-4299-ADC5-1873461B3053}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
